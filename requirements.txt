@@ -4,3 +4,4 @@ mlxtend
 xlsxwriter
 streamlit
 scikit-learn
+openpyxl
