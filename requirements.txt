@@ -1,0 +1,6 @@
+streamlit
+pandas
+mlxtend
+xlsxwriter
+streamlit
+scikit-learn
