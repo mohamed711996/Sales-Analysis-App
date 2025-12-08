@@ -3,6 +3,10 @@ import pandas as pd
 from mlxtend.frequent_patterns import apriori, association_rules
 from mlxtend.preprocessing import TransactionEncoder
 import io
+import warnings
+
+# تجاهل التحذيرات من openpyxl
+warnings.simplefilter("ignore", UserWarning)
 
 # ============================
 #        دوال أساسية
@@ -18,19 +22,22 @@ def load_and_prepare_data(uploaded_file):
     except Exception as e:
         return None, f"خطأ عند قراءة الملف: {e}"
 
-    # تحقق من الأعمدة المطلوبة
-    required_columns = ['Invoice Date', 'Sales Order Number', 'Item Name']
+    required_columns = ['Invoice Date', 'Sales Order Number', 'Item Name', 'SKU']
     missing_cols = [col for col in required_columns if col not in df.columns]
     if missing_cols:
         return None, f"الملف ناقص الأعمدة: {', '.join(missing_cols)}"
 
     # تنظيف البيانات
-    df.dropna(subset=['Sales Order Number', 'Item Name'], inplace=True)
+    df.dropna(subset=['Sales Order Number', 'Item Name', 'SKU'], inplace=True)
     df['Sales Order Number'] = df['Sales Order Number'].astype(str)
     df['Item Name'] = df['Item Name'].str.strip().astype(str)
+    df['SKU'] = df['SKU'].astype(str).str.strip()
     df['Invoice Date'] = pd.to_datetime(df['Invoice Date'], errors='coerce')
     df.dropna(subset=['Invoice Date'], inplace=True)
     df['YearMonth'] = df['Invoice Date'].dt.to_period('M').astype(str)
+
+    # عمود موحد للمنتج (SKU + Item Name)
+    df['Product_Full'] = df['SKU'] + ' - ' + df['Item Name']
 
     if df.empty:
         return None, "الملف فارغ بعد تنظيف البيانات."
@@ -51,7 +58,7 @@ def run_market_basket_analysis(df, target_months, min_support, min_confidence):
     if analysis_df.empty:
         return f"لا توجد بيانات للفترة: {', '.join(target_months)}", "error"
 
-    transactions = analysis_df.groupby('Sales Order Number')['Item Name'].apply(list).tolist()
+    transactions = analysis_df.groupby('Sales Order Number')['Product_Full'].apply(list).tolist()
     total_transactions = len(transactions)
 
     te = TransactionEncoder()
@@ -66,13 +73,13 @@ def run_market_basket_analysis(df, target_months, min_support, min_confidence):
     if rules.empty:
         return f"لم يتم العثور على قواعد بالثقة المطلوبة ({min_confidence}).", "info"
 
-    # البحث عن أرقام الفواتير لكل قاعدة
-    transactions_by_invoice = analysis_df.groupby('Sales Order Number')['Item Name'].apply(set)
+    # البحث عن أرقام الفواتير لكل قاعدة (طريقة أسرع)
+    transactions_by_invoice = analysis_df.groupby('Sales Order Number')['Product_Full'].apply(set).to_dict()
     invoice_lists = []
     for _, rule in rules.iterrows():
         itemset_to_find = rule['antecedents'].union(rule['consequents'])
-        matching_invoices = transactions_by_invoice[transactions_by_invoice.apply(lambda products: products.issuperset(itemset_to_find))]
-        invoice_lists.append(matching_invoices.index.tolist())
+        matching_invoices = [invoice for invoice, items in transactions_by_invoice.items() if items.issuperset(itemset_to_find)]
+        invoice_lists.append(matching_invoices)
 
     rules['invoice_numbers'] = invoice_lists
     rules['antecedents'] = rules['antecedents'].apply(lambda x: ', '.join(list(x)))
@@ -133,7 +140,12 @@ if uploaded_file is not None:
                 st.success(f"تم العثور على {len(result)} قاعدة من قواعد الارتباط.")
                 st.dataframe(result)
                 excel_data = to_excel(result)
-                st.download_button("📥 تحميل النتائج كملف Excel", data=excel_data, file_name="تحليل_سلة_المشتريات.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                st.download_button(
+                    "📥 تحميل النتائج كملف Excel", 
+                    data=excel_data, 
+                    file_name="تحليل_سلة_المشتريات.xlsx", 
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
             elif status == "info": st.info(result)
             elif status == "warning": st.warning(result)
             else: st.error(result)
