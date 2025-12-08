@@ -9,23 +9,17 @@ import io
 # ============================
 
 def load_and_prepare_data(uploaded_file):
-    """قراءة البيانات وتجهيزها بأمان"""
+    """قراءة بيانات Excel بأمان وتجهيزها"""
     if uploaded_file is None:
         return None, "يرجى رفع ملف بيانات أولاً."
 
     try:
-        file_extension = uploaded_file.name.split('.')[-1].lower()
-        if file_extension == 'csv':
-            df = pd.read_csv(uploaded_file, encoding='utf-8-sig')
-        elif file_extension in ['xlsx', 'xls']:
-            df = pd.read_excel(uploaded_file, engine='openpyxl')
-        else:
-            return None, f"نوع الملف '{file_extension}' غير مدعوم."
+        df = pd.read_excel(uploaded_file, engine='openpyxl')
     except Exception as e:
         return None, f"خطأ عند قراءة الملف: {e}"
 
     # تحقق من الأعمدة المطلوبة
-    required_columns = ['Sales Order Number', 'Item Name', 'Invoice Date']
+    required_columns = ['Invoice Date', 'Sales Order Number', 'Item Name']
     missing_cols = [col for col in required_columns if col not in df.columns]
     if missing_cols:
         return None, f"الملف ناقص الأعمدة: {', '.join(missing_cols)}"
@@ -36,11 +30,11 @@ def load_and_prepare_data(uploaded_file):
     df['Item Name'] = df['Item Name'].str.strip().astype(str)
     df['Invoice Date'] = pd.to_datetime(df['Invoice Date'], errors='coerce')
     df.dropna(subset=['Invoice Date'], inplace=True)
+    df['YearMonth'] = df['Invoice Date'].dt.to_period('M').astype(str)
 
     if df.empty:
         return None, "الملف فارغ بعد تنظيف البيانات."
 
-    df['YearMonth'] = df['Invoice Date'].dt.to_period('M').astype(str)
     return df, None
 
 def run_market_basket_analysis(df, target_months, min_support, min_confidence):
@@ -84,7 +78,6 @@ def run_market_basket_analysis(df, target_months, min_support, min_confidence):
     rules['antecedents'] = rules['antecedents'].apply(lambda x: ', '.join(list(x)))
     rules['consequents'] = rules['consequents'].apply(lambda x: ', '.join(list(x)))
     rules['invoice_numbers'] = rules['invoice_numbers'].apply(lambda x: ', '.join(x))
-
     rules['عدد الفواتير'] = (rules['support'] * total_transactions).astype(int)
 
     results_df = rules[[
@@ -117,9 +110,9 @@ def to_excel(df):
 
 st.set_page_config(page_title="محلل سلة المشتريات", layout="wide", page_icon="🛒")
 st.title("🛒 مكتشف علاقات المنتجات")
-st.markdown("ارفع ملف المبيعات، ثم اختر الفترة الزمنية لاكتشاف جميع المنتجات التي تُشترى معًا.")
+st.markdown("ارفع ملف Excel للمبيعات، ثم اختر الفترة الزمنية لاكتشاف جميع المنتجات التي تُشترى معًا.")
 
-uploaded_file = st.file_uploader("1. ارفع ملف بيانات المبيعات (CSV أو Excel)", type=["csv", "xlsx", "xls"])
+uploaded_file = st.file_uploader("1. ارفع ملف بيانات المبيعات (Excel)", type=["xlsx", "xls"])
 
 if uploaded_file is not None:
     df, error_msg = load_and_prepare_data(uploaded_file)
