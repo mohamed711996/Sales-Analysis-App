@@ -11,8 +11,8 @@ import io
 @st.cache_data 
 def load_and_prepare_data(uploaded_file):
     """
-    تقوم هذه الدالة بقراءة البيانات المرفوعة وتجهيزها.
-    تقبل ملفات Excel و CSV.
+    قراءة البيانات المرفوعة وتجهيزها.
+    يدعم ملفات CSV و Excel.
     """
     if uploaded_file is None:
         return None, "يرجى رفع ملف بيانات أولاً."
@@ -29,20 +29,21 @@ def load_and_prepare_data(uploaded_file):
     except Exception as e:
         return None, f"حدث خطأ أثناء قراءة الملف: {e}"
 
-    required_columns = ['Order Reference', 'product name', 'Order Date']
+    # الأعمدة المطلوبة للملف الجديد
+    required_columns = ['Sales Order Number', 'Item Name', 'Invoice Date']
     if not all(col in df.columns for col in required_columns):
         return None, f"الملف يجب أن يحتوي على الأعمدة التالية: {', '.join(required_columns)}"
 
-    df.dropna(axis=0, subset=['Order Reference', 'product name'], inplace=True)
-    df['Order Reference'] = df['Order Reference'].astype(str)
-    df['product name'] = df['product name'].str.strip().astype(str)
-    df['Order Date'] = pd.to_datetime(df['Order Date'], errors='coerce')
-    df.dropna(subset=['Order Date'], inplace=True)
-    df['YearMonth'] = df['Order Date'].dt.to_period('M').astype(str)
+    # تنظيف البيانات
+    df.dropna(axis=0, subset=['Sales Order Number', 'Item Name'], inplace=True)
+    df['Sales Order Number'] = df['Sales Order Number'].astype(str)
+    df['Item Name'] = df['Item Name'].str.strip().astype(str)
+    df['Invoice Date'] = pd.to_datetime(df['Invoice Date'], errors='coerce')
+    df.dropna(subset=['Invoice Date'], inplace=True)
+    df['YearMonth'] = df['Invoice Date'].dt.to_period('M').astype(str)
     
     return df, None
 
-# !!! تم تعديل هذه الدالة لإضافة أرقام الفواتير
 def run_market_basket_analysis(df, target_months, min_support, min_confidence):
     """
     تحليل سلة المشتريات مع إضافة أرقام الفواتير لكل قاعدة.
@@ -59,7 +60,8 @@ def run_market_basket_analysis(df, target_months, min_support, min_confidence):
     if analysis_df.empty:
         return f"لا توجد بيانات مبيعات للفترة المحددة: {', '.join(target_months)}", "error"
     
-    transactions = analysis_df.groupby('Order Reference')['product name'].apply(list).tolist()
+    # تحضير المعاملات (Transactions)
+    transactions = analysis_df.groupby('Sales Order Number')['Item Name'].apply(list).tolist()
     total_transactions = len(transactions)
 
     te = TransactionEncoder()
@@ -74,31 +76,21 @@ def run_market_basket_analysis(df, target_months, min_support, min_confidence):
     if rules.empty: 
         return f"لم يتم العثور على قواعد ربط قوية بالمعايير المحددة (Confidence > {min_confidence:.0%}). حاول تقليل 'الحد الأدنى للثقة'.", "info"
 
-    # !!! بداية الجزء الجديد: البحث عن أرقام الفواتير
-    st.info("جاري البحث عن أرقام الفواتير المطابقة لكل قاعدة...") # رسالة للمستخدم
-    
-    # تجهيز بيانات الفواتير للبحث السريع
-    transactions_by_invoice = analysis_df.groupby('Order Reference')['product name'].apply(set)
-
+    # البحث عن أرقام الفواتير لكل قاعدة
+    st.info("جاري البحث عن أرقام الفواتير المطابقة لكل قاعدة...")
+    transactions_by_invoice = analysis_df.groupby('Sales Order Number')['Item Name'].apply(set)
     invoice_lists = []
+
     for _, rule in rules.iterrows():
-        # دمج الشرط والنتيجة في مجموعة واحدة
         itemset_to_find = rule['antecedents'].union(rule['consequents'])
-        
-        # البحث عن الفواتير التي تحتوي على كل عناصر المجموعة
-        # .issuperset() تتحقق مما إذا كانت مجموعة منتجات الفاتورة تحتوي على كل عناصر القاعدة
         matching_invoices = transactions_by_invoice[transactions_by_invoice.apply(lambda products: products.issuperset(itemset_to_find))]
-        
         invoice_lists.append(matching_invoices.index.tolist())
     
-    # إضافة القائمة كعمود جديد
     rules['invoice_numbers'] = invoice_lists
-    # !!! نهاية الجزء الجديد
 
-    # تجهيز النتائج النهائية للعرض
+    # تجهيز الأعمدة للعرض
     rules['antecedents'] = rules['antecedents'].apply(lambda x: ', '.join(list(x)))
     rules['consequents'] = rules['consequents'].apply(lambda x: ', '.join(list(x)))
-    # تحويل قائمة الفواتير إلى نص للعرض بشكل أفضل
     rules['invoice_numbers'] = rules['invoice_numbers'].apply(lambda x: ', '.join(x))
 
     results_df = rules.sort_values(by='lift', ascending=False).reset_index(drop=True)
@@ -110,22 +102,20 @@ def run_market_basket_analysis(df, target_months, min_support, min_confidence):
         'support': 'نسبة الدعم',
         'confidence': 'نسبة الثقة',
         'lift': 'مقياس القوة (Lift)',
-        'invoice_numbers': 'أرقام الفواتير' # <-- العمود الجديد
+        'invoice_numbers': 'أرقام الفواتير'
     }, inplace=True)
     
     results_df['عدد الفواتير (الشرط والنتيجة معًا)'] = (results_df['نسبة الدعم'] * total_transactions).astype(int)
 
-    # إعادة ترتيب الأعمدة لتكون أكثر منطقية
     final_columns_order = [
         'إذا اشترى العميل (الشرط)',
         'فإنه يشتري أيضًا (النتيجة)',
         'عدد الفواتير (الشرط والنتيجة معًا)', 
-        'أرقام الفواتير', # <-- وضع العمود الجديد هنا
+        'أرقام الفواتير',
         'نسبة الدعم',
         'نسبة الثقة',
         'مقياس القوة (Lift)'
     ]
-    # اختيار الأعمدة النهائية بالترتيب المطلوب
     results_df = results_df[final_columns_order]
 
     return results_df, "success"
@@ -137,9 +127,7 @@ def to_excel(df):
         worksheet = writer.sheets['نتائج التحليل']
         for idx, col in enumerate(df):
             series = df[col]
-            # تعديل بسيط للتعامل مع الأعمدة الطويلة جدًا مثل أرقام الفواتير
             max_len = max((series.astype(str).map(len).max(), len(str(series.name))))
-            # وضع حد أقصى لعرض العمود حتى لا يصبح الملف ضخمًا جدًا
             worksheet.set_column(idx, idx, min(max_len + 2, 60)) 
     return output.getvalue()
 
@@ -184,7 +172,6 @@ if uploaded_file is not None:
 
         if target_months:
             if st.button("🔍 اكتشف علاقات المنتجات", type="primary"):
-                # استخدام spinner لعرض رسائل متعددة للمستخدم
                 with st.spinner("جاري تحليل الأنماط المتكررة..."):
                     result, status = run_market_basket_analysis(df, target_months, min_support_val, min_confidence_val)
                 
@@ -193,7 +180,6 @@ if uploaded_file is not None:
 
                 if status == "success":
                     st.success(f"تم العثور على {len(result)} قاعدة من قواعد الارتباط القوية.")
-                    # عرض النتائج في جدول يمكن التحكم فيه
                     st.dataframe(result)
                     
                     excel_data = to_excel(result)
