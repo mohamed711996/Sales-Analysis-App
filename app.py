@@ -8,11 +8,10 @@ import io
 #               الدوال الأساسية (المنطق الخلفي)
 # ===================================================================
 
-@st.cache_data 
+@st.cache_data
 def load_and_prepare_data(uploaded_file):
     """
-    قراءة البيانات المرفوعة وتجهيزها.
-    يدعم ملفات CSV و Excel.
+    قراءة البيانات وتجهيزها مع الحماية من الأخطاء الشائعة.
     """
     if uploaded_file is None:
         return None, "يرجى رفع ملف بيانات أولاً."
@@ -20,19 +19,18 @@ def load_and_prepare_data(uploaded_file):
     try:
         file_extension = uploaded_file.name.split('.')[-1].lower()
         if file_extension == 'csv':
-            df = pd.read_csv(uploaded_file, encoding='utf-8')
+            df = pd.read_csv(uploaded_file, encoding='utf-8-sig')
         elif file_extension in ['xlsx', 'xls']:
             df = pd.read_excel(uploaded_file, engine='openpyxl')
         else:
-            return None, f"نوع الملف '{file_extension}' غير مدعوم. يرجى استخدام CSV أو XLSX."
-            
+            return None, f"نوع الملف '{file_extension}' غير مدعوم. استخدم CSV أو XLSX."
     except Exception as e:
         return None, f"حدث خطأ أثناء قراءة الملف: {e}"
 
-    # الأعمدة المطلوبة للملف الجديد
     required_columns = ['Sales Order Number', 'Item Name', 'Invoice Date']
-    if not all(col in df.columns for col in required_columns):
-        return None, f"الملف يجب أن يحتوي على الأعمدة التالية: {', '.join(required_columns)}"
+    missing_cols = [col for col in required_columns if col not in df.columns]
+    if missing_cols:
+        return None, f"الملف ناقص الأعمدة التالية: {', '.join(missing_cols)}"
 
     # تنظيف البيانات
     df.dropna(axis=0, subset=['Sales Order Number', 'Item Name'], inplace=True)
@@ -40,8 +38,11 @@ def load_and_prepare_data(uploaded_file):
     df['Item Name'] = df['Item Name'].str.strip().astype(str)
     df['Invoice Date'] = pd.to_datetime(df['Invoice Date'], errors='coerce')
     df.dropna(subset=['Invoice Date'], inplace=True)
+
+    if df.empty:
+        return None, "الملف فارغ بعد تنظيف البيانات. تحقق من الأعمدة والتواريخ."
+
     df['YearMonth'] = df['Invoice Date'].dt.to_period('M').astype(str)
-    
     return df, None
 
 def run_market_basket_analysis(df, target_months, min_support, min_confidence):
@@ -56,13 +57,15 @@ def run_market_basket_analysis(df, target_months, min_support, min_confidence):
         analysis_df = df.copy()
     else:
         analysis_df = df[df['YearMonth'].isin(target_months)]
-    
+
     if analysis_df.empty:
-        return f"لا توجد بيانات مبيعات للفترة المحددة: {', '.join(target_months)}", "error"
-    
-    # تحضير المعاملات (Transactions)
+        return f"لا توجد بيانات للفترة المحددة: {', '.join(target_months)}", "error"
+
     transactions = analysis_df.groupby('Sales Order Number')['Item Name'].apply(list).tolist()
     total_transactions = len(transactions)
+
+    if total_transactions == 0:
+        return "لا توجد معاملات صالحة بعد التجهيز.", "error"
 
     te = TransactionEncoder()
     te_ary = te.fit(transactions).transform(transactions)
@@ -71,13 +74,13 @@ def run_market_basket_analysis(df, target_months, min_support, min_confidence):
     frequent_itemsets = apriori(onehot_df, min_support=min_support, use_colnames=True)
     if frequent_itemsets.empty: 
         return "لم يتم العثور على أنماط شراء متكررة. حاول تقليل قيمة 'الحد الأدنى للدعم'.", "warning"
-    
+
     rules = association_rules(frequent_itemsets, metric="confidence", min_threshold=min_confidence)
-    if rules.empty: 
+    if rules.empty:
         return f"لم يتم العثور على قواعد ربط قوية بالمعايير المحددة (Confidence > {min_confidence:.0%}). حاول تقليل 'الحد الأدنى للثقة'.", "info"
 
     # البحث عن أرقام الفواتير لكل قاعدة
-    st.info("جاري البحث عن أرقام الفواتير المطابقة لكل قاعدة...")
+    st.info("جاري البحث عن أرقام الفواتير لكل قاعدة...")
     transactions_by_invoice = analysis_df.groupby('Sales Order Number')['Item Name'].apply(set)
     invoice_lists = []
 
@@ -85,17 +88,13 @@ def run_market_basket_analysis(df, target_months, min_support, min_confidence):
         itemset_to_find = rule['antecedents'].union(rule['consequents'])
         matching_invoices = transactions_by_invoice[transactions_by_invoice.apply(lambda products: products.issuperset(itemset_to_find))]
         invoice_lists.append(matching_invoices.index.tolist())
-    
-    rules['invoice_numbers'] = invoice_lists
 
-    # تجهيز الأعمدة للعرض
+    rules['invoice_numbers'] = invoice_lists
     rules['antecedents'] = rules['antecedents'].apply(lambda x: ', '.join(list(x)))
     rules['consequents'] = rules['consequents'].apply(lambda x: ', '.join(list(x)))
     rules['invoice_numbers'] = rules['invoice_numbers'].apply(lambda x: ', '.join(x))
 
     results_df = rules.sort_values(by='lift', ascending=False).reset_index(drop=True)
-
-    # إعادة تسمية الأعمدة للغة العربية
     results_df.rename(columns={
         'antecedents': 'إذا اشترى العميل (الشرط)',
         'consequents': 'فإنه يشتري أيضًا (النتيجة)',
@@ -104,20 +103,18 @@ def run_market_basket_analysis(df, target_months, min_support, min_confidence):
         'lift': 'مقياس القوة (Lift)',
         'invoice_numbers': 'أرقام الفواتير'
     }, inplace=True)
-    
     results_df['عدد الفواتير (الشرط والنتيجة معًا)'] = (results_df['نسبة الدعم'] * total_transactions).astype(int)
 
     final_columns_order = [
         'إذا اشترى العميل (الشرط)',
         'فإنه يشتري أيضًا (النتيجة)',
-        'عدد الفواتير (الشرط والنتيجة معًا)', 
+        'عدد الفواتير (الشرط والنتيجة معًا)',
         'أرقام الفواتير',
         'نسبة الدعم',
         'نسبة الثقة',
         'مقياس القوة (Lift)'
     ]
     results_df = results_df[final_columns_order]
-
     return results_df, "success"
 
 def to_excel(df):
@@ -130,7 +127,6 @@ def to_excel(df):
             max_len = max((series.astype(str).map(len).max(), len(str(series.name))))
             worksheet.set_column(idx, idx, min(max_len + 2, 60)) 
     return output.getvalue()
-
 
 # ===================================================================
 #                      واجهة المستخدم (Streamlit UI)
@@ -195,6 +191,5 @@ if uploaded_file is not None:
                 else: st.error(result)
         else:
             st.info("يرجى اختيار فترة التحليل من القائمة أعلاه للبدء.")
-
 else:
     st.info("في انتظار رفع ملف البيانات...")
