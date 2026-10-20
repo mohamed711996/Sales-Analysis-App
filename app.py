@@ -163,8 +163,8 @@ def to_excel(df):
 #        واجهة المستخدم
 # ============================
 
-st.set_page_config(page_title="مكتشف البندلز وعلاقات المنتجات", layout="wide", page_icon="🛒")
-st.title("🛒 مكتشف البندلز الذكي (بناءً على سلوك العملاء)")
+st.set_page_config(page_title="machine learning", layout="wide", page_icon="🛒")
+st.title(" تحليل الاصناف )")
 st.markdown("ارفع ملف Excel المصدّر من Odoo لاكتشاف أفضل مجموعات المنتجات (Bundles) التي يشتريها العملاء معًا بشكل متكرر، مع استبعاد الكتب التعليمية والمصروفات والمرتجعات تلقائياً.")
 
 uploaded_file = st.file_uploader("1. ارفع ملف بيانات المبيعات (Excel)", type=["xlsx", "xls"])
