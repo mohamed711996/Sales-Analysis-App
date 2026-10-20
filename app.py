@@ -13,7 +13,7 @@ warnings.simplefilter("ignore", UserWarning)
 # ============================
 
 def load_and_prepare_data(uploaded_file):
-    """قراءة بيانات Excel بأمان وتجهيزها"""
+    """قراءة بيانات Excel من Odoo وتجهيزها"""
     if uploaded_file is None:
         return None, "يرجى رفع ملف بيانات أولاً."
 
@@ -22,27 +22,36 @@ def load_and_prepare_data(uploaded_file):
     except Exception as e:
         return None, f"خطأ عند قراءة الملف: {e}"
 
-    required_columns = ['Invoice Date', 'Sales Order Number', 'Item Name', 'SKU']
+    required_columns = ['Order Reference', 'Order Date', 'Invoices/Invoice lines/Product', 'Invoices/Invoice lines/Quantity']
     missing_cols = [col for col in required_columns if col not in df.columns]
     if missing_cols:
-        return None, f"الملف ناقص الأعمدة: {', '.join(missing_cols)}"
+        return None, f"الملف ناقص الأعمدة التالية: {', '.join(missing_cols)}"
 
-    # تنظيف البيانات
-    df.dropna(subset=['Sales Order Number', 'Item Name', 'SKU'], inplace=True)
-    df['Sales Order Number'] = df['Sales Order Number'].astype(str)
-    df['Item Name'] = df['Item Name'].str.strip().astype(str)
-    df['SKU'] = df['SKU'].astype(str).str.strip()
-    df['Invoice Date'] = pd.to_datetime(df['Invoice Date'], errors='coerce')
-    df.dropna(subset=['Invoice Date'], inplace=True)
-    df['YearMonth'] = df['Invoice Date'].dt.to_period('M').astype(str)
+    # ملء القيم الفارغة في أرقام الطلبات والتاريخ (لأن Odoo يتركها فارغة للأسطر اللاحقة في نفس الفاتورة)
+    df['Order Reference'] = df['Order Reference'].ffill()
+    df['Order Date'] = df['Order Date'].ffill()
 
-    # عمود موحد للمنتج (SKU + Item Name)
-    df['Product_Full'] = df['SKU'] + ' - ' + df['Item Name']
+    # تنظيف البيانات الأساسية
+    df.dropna(subset=['Order Reference', 'Invoices/Invoice lines/Product', 'Invoices/Invoice lines/Quantity'], inplace=True)
+    df['Order Reference'] = df['Order Reference'].astype(str).str.strip()
+    df['Invoices/Invoice lines/Product'] = df['Invoices/Invoice lines/Product'].astype(str).str.strip()
+    df['Invoices/Invoice lines/Quantity'] = pd.to_numeric(df['Invoices/Invoice lines/Quantity'], errors='coerce').fillna(0)
 
-    if df.empty:
-        return None, "الملف فارغ بعد تنظيف البيانات."
+    df['Order Date'] = pd.to_datetime(df['Order Date'], errors='coerce')
+    df.dropna(subset=['Order Date'], inplace=True)
+    df['YearMonth'] = df['Order Date'].dt.to_period('M').astype(str)
 
-    return df, None
+    # تجميع الكميات لكل منتج داخل نفس الطلب (للتعامل مع المرتجعات والكميات السالبة)
+    # إذا كانت الكمية الصافية للمنتج في الطلب <= 0 يتم استبعاده
+    grouped_qty = df.groupby(['Order Reference', 'Invoices/Invoice lines/Product', 'YearMonth'], as_index=False)['Invoices/Invoice lines/Quantity'].sum()
+
+    # استبعاد المنتجات التي كميتها الصافية <= 0 (مرتجعات / ألغيت)
+    valid_df = grouped_qty[grouped_qty['Invoices/Invoice lines/Quantity'] > 0].copy()
+
+    if valid_df.empty:
+        return None, "الملف فارغ بعد تصفية المرتجعات وتجهيز البيانات."
+
+    return valid_df, None
 
 def run_market_basket_analysis(df, target_months, min_support, min_confidence):
     """تحليل سلة المشتريات وإرجاع النتائج"""
@@ -58,7 +67,8 @@ def run_market_basket_analysis(df, target_months, min_support, min_confidence):
     if analysis_df.empty:
         return f"لا توجد بيانات للفترة: {', '.join(target_months)}", "error"
 
-    transactions = analysis_df.groupby('Sales Order Number')['Product_Full'].apply(list).tolist()
+    # تجهيز المعاملات (كل Order Reference يمثل سلة مشتريات)
+    transactions = analysis_df.groupby('Order Reference')['Invoices/Invoice lines/Product'].apply(list).tolist()
     total_transactions = len(transactions)
 
     te = TransactionEncoder()
@@ -67,14 +77,14 @@ def run_market_basket_analysis(df, target_months, min_support, min_confidence):
 
     frequent_itemsets = apriori(onehot_df, min_support=min_support, use_colnames=True)
     if frequent_itemsets.empty:
-        return "لم يتم العثور على أنماط شراء متكررة. قلل قيمة الدعم.", "warning"
+        return "لم يتم العثور على أنماط شراء متكررة. قلل قيمة الدعم (Support).", "warning"
 
     rules = association_rules(frequent_itemsets, metric="confidence", min_threshold=min_confidence)
     if rules.empty:
-        return f"لم يتم العثور على قواعد بالثقة المطلوبة ({min_confidence}).", "info"
+        return f"لم يتم العثور على قواعد بالثقة المطلوبة ({min_confidence}). جرب خفض قيمة الثقة أو الدعم.", "info"
 
-    # البحث عن أرقام الفواتير لكل قاعدة (طريقة أسرع)
-    transactions_by_invoice = analysis_df.groupby('Sales Order Number')['Product_Full'].apply(set).to_dict()
+    # البحث عن أرقام الفواتير لكل قاعدة
+    transactions_by_invoice = analysis_df.groupby('Order Reference')['Invoices/Invoice lines/Product'].apply(set).to_dict()
     invoice_lists = []
     for _, rule in rules.iterrows():
         itemset_to_find = rule['antecedents'].union(rule['consequents'])
@@ -95,7 +105,7 @@ def run_market_basket_analysis(df, target_months, min_support, min_confidence):
         'support': 'نسبة الدعم',
         'confidence': 'نسبة الثقة',
         'lift': 'مقياس القوة (Lift)',
-        'invoice_numbers': 'أرقام الفواتير'
+        'invoice_numbers': 'أرقام الطلبات'
     })
 
     return results_df, "success"
@@ -116,8 +126,8 @@ def to_excel(df):
 # ============================
 
 st.set_page_config(page_title="محلل سلة المشتريات", layout="wide", page_icon="🛒")
-st.title("🛒 مكتشف علاقات المنتجات")
-st.markdown("ارفع ملف Excel للمبيعات، ثم اختر الفترة الزمنية لاكتشاف جميع المنتجات التي تُشترى معًا.")
+st.title("🛒 مكتشف علاقات المنتجات (صيغة Odoo)")
+st.markdown("ارفع ملف Excel المصدّر من Odoo، ثم اختر الفترة الزمنية لاكتشاف المنتجات التي تُشترى معًا (مع استبعاد المرتجعات تلقائياً).")
 
 uploaded_file = st.file_uploader("1. ارفع ملف بيانات المبيعات (Excel)", type=["xlsx", "xls"])
 
@@ -126,7 +136,7 @@ if uploaded_file is not None:
     if error_msg:
         st.error(error_msg)
     else:
-        st.success("تم تحميل وتجهيز البيانات بنجاح!")
+        st.success("تم تحميل وتجهيز البيانات بنجاح واستبعاد المرتجعات!")
         all_months_option = "كل الشهور (الفترة الكاملة)"
         options = [all_months_option] + sorted(df['YearMonth'].unique())
         target_months = st.multiselect("اختر الشهور للتحليل:", options=options)
@@ -141,9 +151,9 @@ if uploaded_file is not None:
                 st.dataframe(result)
                 excel_data = to_excel(result)
                 st.download_button(
-                    "📥 تحميل النتائج كملف Excel", 
-                    data=excel_data, 
-                    file_name="تحليل_سلة_المشتريات.xlsx", 
+                    "📥 تحميل النتائج كملف Excel",
+                    data=excel_data,
+                    file_name="تحليل_سلة_المشتريات_أودو.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
             elif status == "info": st.info(result)
