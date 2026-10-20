@@ -13,7 +13,7 @@ warnings.simplefilter("ignore", UserWarning)
 # ============================
 
 def load_and_prepare_data(uploaded_file):
-    """قراءة بيانات Excel من Odoo وتجهيزها واستبعاد المصروفات والعهود"""
+    """قراءة بيانات Excel من Odoo وتجهيزها واستبعاد المصروفات والكتب التعليمية"""
     if uploaded_file is None:
         return None, "يرجى رفع ملف بيانات أولاً."
 
@@ -24,50 +24,64 @@ def load_and_prepare_data(uploaded_file):
 
     required_columns = ['Order Reference', 'Order Date', 'Invoices/Invoice lines/Product', 'Invoices/Invoice lines/Quantity']
 
-    # التأكد من وجود عمود التصنيف (Product Category) إن أمكن
-    has_category = 'Invoices/Invoice lines/Product Category' in df.columns
+    # التأكد من وجود عمود التصنيف
+    category_col = 'Invoices/Invoice lines/Product Category'
+    if category_col not in df.columns:
+        # محاولة البحث عن اسم العمود البديل المذكور
+        if 'Product Category/Complete Name' in df.columns:
+            category_col = 'Product Category/Complete Name'
+        else:
+            return None, f"الملف لا يحتوي على عمود التصنيف المتوقع."
 
     missing_cols = [col for col in required_columns if col not in df.columns]
     if missing_cols:
         return None, f"الملف ناقص الأعمدة التالية: {', '.join(missing_cols)}"
 
-    # ملء القيم الفارغة في أرقام الطلبات والتاريخ
+    # ملء القيم الفارغة
     df['Order Reference'] = df['Order Reference'].ffill()
     df['Order Date'] = df['Order Date'].ffill()
-    if has_category:
-        df['Invoices/Invoice lines/Product Category'] = df['Invoices/Invoice lines/Product Category'].ffill()
-    else:
-        df['Invoices/Invoice lines/Product Category'] = 'غير محدد'
+    df[category_col] = df[category_col].ffill()
 
     # تنظيف البيانات الأساسية
     df.dropna(subset=['Order Reference', 'Invoices/Invoice lines/Product', 'Invoices/Invoice lines/Quantity'], inplace=True)
     df['Order Reference'] = df['Order Reference'].astype(str).str.strip()
     df['Invoices/Invoice lines/Product'] = df['Invoices/Invoice lines/Product'].astype(str).str.strip()
-    df['Invoices/Invoice lines/Product Category'] = df['Invoices/Invoice lines/Product Category'].astype(str).str.strip()
+    df[category_col] = df[category_col].astype(str).str.strip()
     df['Invoices/Invoice lines/Quantity'] = pd.to_numeric(df['Invoices/Invoice lines/Quantity'], errors='coerce').fillna(0)
 
-    # استبعاد المنتجات الخاصة بـ "employee custody" أو "Shipping fees"
+    # 1. استبعاد المصروفات والعهود
     exclude_keywords = ['employee custody', 'shipping fees', 'shipping', 'custody']
     pattern = '|'.join(exclude_keywords)
     df = df[~df['Invoices/Invoice lines/Product'].str.lower().str.contains(pattern, na=False)].copy()
+
+    # 2. استبعاد الكتب التعليمية المحددة من الكاتيجوري
+    excluded_categories = [
+        'Books / Educational / Selah Eltelmeez',
+        'Books / Educational / Al Adwaa',
+        'Books / Educational / El Emtehan',
+        'Books / Educational / El Moasser'
+    ]
+    df = df[~df[category_col].isin(excluded_categories)].copy()
 
     df['Order Date'] = pd.to_datetime(df['Order Date'], errors='coerce')
     df.dropna(subset=['Order Date'], inplace=True)
     df['YearMonth'] = df['Order Date'].dt.to_period('M').astype(str)
 
     # تجميع الكميات لكل منتج داخل نفس الطلب
-    grouped_qty = df.groupby(['Order Reference', 'Invoices/Invoice lines/Product', 'Invoices/Invoice lines/Product Category', 'YearMonth'], as_index=False)['Invoices/Invoice lines/Quantity'].sum()
+    grouped_qty = df.groupby(['Order Reference', 'Invoices/Invoice lines/Product', category_col, 'YearMonth'], as_index=False)['Invoices/Invoice lines/Quantity'].sum()
 
     # استبعاد المنتجات التي كميتها الصافية <= 0 (مرتجعات)
     valid_df = grouped_qty[grouped_qty['Invoices/Invoice lines/Quantity'] > 0].copy()
 
     if valid_df.empty:
-        return None, "الملف فارغ بعد تصفية المرتجعات والمصروفات وتجهيز البيانات."
+        return None, "الملف فارغ بعد تصفية المرتجعات والمصروفات والكتب التعليمية."
 
+    # إعادة تسمية عمود التصنيف ليكون موحداً
+    valid_df.rename(columns={category_col: 'Category'}, inplace=True)
     return valid_df, None
 
 def run_market_basket_analysis(df, target_months, selected_categories, min_support, min_confidence, max_len):
-    """تحليل سلة المشتريات مع فلترة التصنيفات (Categories)"""
+    """تحليل سلة المشتريات مع فلترة التصنيفات"""
     if not target_months:
         return "اختر فترة للتحليل.", "error"
 
@@ -78,10 +92,10 @@ def run_market_basket_analysis(df, target_months, selected_categories, min_suppo
     if all_months_option not in target_months:
         analysis_df = analysis_df[analysis_df['YearMonth'].isin(target_months)]
 
-    # تطبيق فلترة التصنيفات (Categories)
+    # تطبيق فلترة التصنيفات
     all_cat_option = "كل التصنيفات (الكل)"
     if selected_categories and all_cat_option not in selected_categories:
-        analysis_df = analysis_df[analysis_df['Invoices/Invoice lines/Product Category'].isin(selected_categories)]
+        analysis_df = analysis_df[analysis_df['Category'].isin(selected_categories)]
 
     if analysis_df.empty:
         return "لا توجد بيانات تطابق الفلاتر المحددة (الشهور / التصنيفات).", "error"
@@ -107,7 +121,7 @@ def run_market_basket_analysis(df, target_months, selected_categories, min_suppo
 
     rules = rules.sort_values(by=['lift', 'confidence'], ascending=False).reset_index(drop=True)
 
-    # البحث عن أرقام الفواتير لكل قاعدة
+    # البحث عن أرقام الفواتير
     transactions_by_invoice = analysis_df.groupby('Order Reference')['Invoices/Invoice lines/Product'].apply(set).to_dict()
     invoice_lists = []
     for _, rule in rules.iterrows():
@@ -150,8 +164,8 @@ def to_excel(df):
 # ============================
 
 st.set_page_config(page_title="مكتشف البندلز وعلاقات المنتجات", layout="wide", page_icon="🛒")
-st.title("تحليل الاصناف ")
-st.markdown("ارفع ملف Excel المصدّر من Odoo لاكتشاف أفضل مجموعات المنتجات (Bundles) التي يشتريها العملاء معًا بشكل متكرر، مع إمكانية التصفية حسب التصنيفات والتواريخ واستبعاد المصروفات والمرتجعات.")
+st.title("🛒 مكتشف البندلز الذكي (بناءً على سلوك العملاء)")
+st.markdown("ارفع ملف Excel المصدّر من Odoo لاكتشاف أفضل مجموعات المنتجات (Bundles) التي يشتريها العملاء معًا بشكل متكرر، مع استبعاد الكتب التعليمية والمصروفات والمرتجعات تلقائياً.")
 
 uploaded_file = st.file_uploader("1. ارفع ملف بيانات المبيعات (Excel)", type=["xlsx", "xls"])
 
@@ -160,90 +174,55 @@ if uploaded_file is not None:
     if error_msg:
         st.error(error_msg)
     else:
-        st.success("✅ تم تحميل البيانات وتصفية المرتجعات والبنود غير المرغوبة بنجاح!")
+        st.success("✅ تم تحميل البيانات وتصفية المرتجعات والمصروفات والكتب التعليمية بنجاح!")
 
         st.markdown("---")
         st.subheader("⚙️ إعدادات وتخصيص التحليل والفلاتر")
 
-        # 1. فلتر التصنيفات (Categories)
+        # فلتر التصنيفات
         all_cat_option = "كل التصنيفات (الكل)"
-        available_categories = [all_cat_option] + sorted(df['Invoices/Invoice lines/Product Category'].unique().tolist())
+        available_categories = [all_cat_option] + sorted(df['Category'].unique().tolist())
         selected_categories = st.multiselect(
             "🗂️ تصفية حسب تصنيف المنتجات (Product Categories):",
             options=available_categories,
             default=[all_cat_option],
-            help="اختر تصنيفاً أو عدة تصنيفات محددة لدراسة البندلز الخاصة بها (مثلاً: الأدوات المكتبية فقط، أو الأحبار فقط)."
+            help="اختر تصنيفاً أو عدة تصنيفات محددة لدراسة البندلز الخاصة بها."
         )
-        st.caption("💡 **فائدة هذا الفلتر:** يتيح لك التركيز على قسم معين في المتجر لاكتشاف العروض الخاصة به دون اختلاط الأقسام الأخرى.")
+        st.caption("💡 يساعدك على التركيز على أقسام معينة (تم استبعاد الكتب التعليمية تلقائياً).")
 
-        # 2. فلتر الفترة الزمنية
+        # فلتر الفترة الزمنية
         all_months_option = "كل الشهور (الفترة الكاملة)"
         options = [all_months_option] + sorted(df['YearMonth'].unique())
         target_months = st.multiselect(
             "📅 اختر الشهور للتحليل:",
             options=options,
-            default=[all_months_option],
-            help="حدد الشهور التي تريد دراسة سلوك العملاء خلالها."
+            default=[all_months_option]
         )
-        st.caption("💡 **فائدة هذا الفلتر:** يساعدك على معرفة ما إذا كانت هناك منتجات ترتبط ببعضها في مواسم أو شهور معينة.")
 
-        # 3. عدد المنتجات في البندل
-        max_items_in_bundle = st.slider(
-            "📦 عدد المنتجات في البندل (Max Bundle Size):",
-            min_value=2,
-            max_value=5,
-            value=3,
-            step=1,
-            help="يحدد أقصى عدد من المنتجات التي يتم ربطها معاً في العرض المشترك."
-        )
-        st.caption("💡 **فائدة هذا الفلتر:** التحكم في حجم العبوة أو العرض (بندل ثنائي، ثلاثي، إلخ).")
+        # عدد المنتجات في البندل
+        max_items_in_bundle = st.slider("📦 عدد المنتجات في البندل (Max Bundle Size):", 2, 5, 3, 1)
 
         col1, col2 = st.columns(2)
         with col1:
-            min_support_val = st.slider(
-                "📊 الحد الأدنى للدعم (Support):",
-                0.001, 0.1, 0.005, 0.001,
-                help="نسبة شيوع هذا البندل مقارنة بكل إجمالي الفواتير."
-            )
-            st.caption("💡 يمثل مدى انتشار هذا البندل في المبيعات.")
-
+            min_support_val = st.slider("📊 الحد الأدنى للدعم (Support):", 0.001, 0.1, 0.005, 0.001)
         with col2:
-            min_confidence_val = st.slider(
-                "🎯 الحد الأدنى للثقة (Confidence):",
-                0.1, 1.0, 0.3, 0.05,
-                help="نسبة الثقة (تمثل احتمالية شراء المنتج الثاني عندما يشتري العميل المنتج الأول)."
-            )
-            # شرح تفصيلي مبسط لنسبة الثقة بناءً على طلب المستخدم
+            min_confidence_val = st.slider("🎯 الحد الأدنى للثقة (Confidence):", 0.1, 1.0, 0.3, 0.05)
             st.caption("""
-            💡 **ماذا تعني نسبة الثقة (Confidence) بالتفصيل؟**
-            هي **معدل النجاح أو الاحتمالية** وتُحسَب هكذا:
-            * *مثال:* لو اخترت الثقة **0.5 (50%)**، فهذا معناه أن **كل 100 عميل** اشتروا المنتج (أ) قام **50 منهم** بشراء المنتج (ب) معه في نفس الفاتورة.
-            * كلما زادت النسبة (قريب من 100%) كلما كان الرابط أكيداً، وكلما قللتها (مثل 30%) كلما سمحت باكتشاف فرص تسويقية جديدة ولكن باحتمالية أقل.
+            💡 **معنى نسبة الثقة:** لو اخترت 0.5 (50%)، فهذا يعني أن **كل 100 عميل** اشتروا المنتج (أ) قام **50 منهم** بشراء المنتج (ب) معه في نفس الفاتورة.
             """)
 
         st.markdown("---")
 
         if st.button("🚀 تحليل واقتراح البندلز بناءً على سلوك العملاء", type="primary"):
-            with st.spinner("جاري تحليل سلال المشتريات واستخراج أفضل البندلز..."):
+            with st.spinner("جاري التحليل..."):
                 result, status = run_market_basket_analysis(df, target_months, selected_categories, min_support_val, min_confidence_val, max_items_in_bundle)
                 if status == "success":
-                    st.success(f"🎉 تم العثور على {len(result)} بندل وعلاقة ارتباط ناجحة!")
-
-                    # عرض النتائج في جدول مرتب
+                    st.success(f"🎉 تم العثور على {len(result)} بندل ناجح!")
                     st.dataframe(result, use_container_width=True)
-
                     excel_data = to_excel(result)
-                    st.download_button(
-                        "📥 تحميل تقارير البندلز المقترحة كملف Excel",
-                        data=excel_data,
-                        file_name="بندلز_المشتريات_المقترحة.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
-                elif status == "info":
-                    st.info(result)
-                elif status == "warning":
-                    st.warning(result)
-                else:
-                    st.error(result)
+                    st.download_button("📥 تحميل النتائج كملف Excel", data=excel_data, file_name="بندلز_المشتريات.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                elif status == "info": st.info(result)
+                elif status == "warning": st.warning(result)
+                else: st.error(result)
 else:
-    st.info("📂 في انتظار رفع ملف بيانات المبيعات لبدء التحليل...")
+    st.info("📂 في انتظار رفع ملف بيانات المبيعات...")
