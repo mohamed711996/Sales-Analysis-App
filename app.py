@@ -164,7 +164,7 @@ def to_excel(df):
 # ============================
 
 st.set_page_config(page_title="machine learning", layout="wide", page_icon="🛒")
-st.title(" تحليل الاصناف )")
+st.title(" تحليل الاصناف")
 st.markdown("ارفع ملف Excel المصدّر من Odoo لاكتشاف أفضل مجموعات المنتجات (Bundles) التي يشتريها العملاء معًا بشكل متكرر، مع استبعاد الكتب التعليمية والمصروفات والمرتجعات تلقائياً.")
 
 uploaded_file = st.file_uploader("1. ارفع ملف بيانات المبيعات (Excel)", type=["xlsx", "xls"])
